@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Modality } from '@google/genai';
 
 const ALLOWED_IMAGE_SIZES = new Set(['1K', '2K', '4K']);
 const ALLOWED_BACKGROUNDS = new Set([
@@ -14,7 +14,12 @@ const ALLOWED_BACKGROUNDS = new Set([
   '#FFFFFF',
   '#000000',
 ]);
-const IMAGE_MODEL = 'gemini-3.1-flash-image';
+const PRIMARY_IMAGE_MODEL = 'gemini-3.1-flash-image';
+const GENERATE_CONTENT_IMAGE_MODELS = [
+  'gemini-2.5-flash-image',
+  'gemini-2.0-flash-preview-image-generation',
+  'gemini-2.0-flash-exp-image-generation',
+];
 
 const getApiClient = (apiKey: unknown): GoogleGenAI | null => {
   if (typeof apiKey !== 'string' || !apiKey.trim()) return null;
@@ -49,24 +54,6 @@ const getApiErrorMessage = (error: any): string => {
   }
 
   return 'Không thể kết nối hoặc kiểm tra API key. Hãy thử lại sau.';
-};
-
-const listModelsForKey = async (apiKey: string): Promise<string[]> => {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
-  );
-  const payload = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    const detail = payload?.error?.message || response.statusText || `HTTP ${response.status}`;
-    throw new Error(detail);
-  }
-
-  return Array.isArray(payload.models)
-    ? payload.models
-        .map((model: any) => (typeof model?.name === 'string' ? model.name.replace('models/', '') : null))
-        .filter(Boolean)
-    : [];
 };
 
 const getQualityDescription = (quality: number): string => {
@@ -149,7 +136,17 @@ const extractImageBase64FromInteraction = (interaction: any): string | null => {
   return null;
 };
 
-const generateImage = async (
+const extractImageBase64FromGenerateContent = (response: any): string | null => {
+  const parts = response?.candidates?.[0]?.content?.parts || [];
+  for (const part of parts) {
+    if (typeof part?.inlineData?.data === 'string') return part.inlineData.data;
+    if (typeof part?.inline_data?.data === 'string') return part.inline_data.data;
+  }
+
+  return null;
+};
+
+const generateImageWithInteractions = async (
   ai: GoogleGenAI,
   base64ImageData: string,
   mimeType: string,
@@ -158,7 +155,7 @@ const generateImage = async (
 ): Promise<string> => {
   const interaction = await ai.interactions.create({
     api_version: 'v1beta',
-    model: IMAGE_MODEL,
+    model: PRIMARY_IMAGE_MODEL,
     input: [
       {
         type: 'text',
@@ -188,6 +185,72 @@ const generateImage = async (
   return imageBase64;
 };
 
+const generateImageWithGenerateContent = async (
+  ai: GoogleGenAI,
+  base64ImageData: string,
+  mimeType: string,
+  prompt: string,
+  imageSize: string,
+): Promise<{ imageBase64: string; model: string }> => {
+  let lastError: any = null;
+
+  for (const model of GENERATE_CONTENT_IMAGE_MODELS) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64ImageData,
+                mimeType,
+              },
+            },
+            {
+              text: prompt,
+            },
+          ],
+        },
+        config: {
+          responseModalities: [Modality.TEXT, Modality.IMAGE],
+          imageConfig: {
+            imageSize,
+          },
+        },
+      });
+
+      const imageBase64 = extractImageBase64FromGenerateContent(response);
+      if (imageBase64) return { imageBase64, model };
+
+      lastError = new Error(`Model ${model} did not return image data.`);
+    } catch (error: any) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      if (!/404|not found|not supported|model|response modalities|PERMISSION_DENIED|permission/i.test(message)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('No compatible image model returned image data.');
+};
+
+const generateImage = async (
+  ai: GoogleGenAI,
+  base64ImageData: string,
+  mimeType: string,
+  prompt: string,
+  imageSize: string,
+): Promise<{ imageBase64: string; model: string }> => {
+  try {
+    const imageBase64 = await generateImageWithInteractions(ai, base64ImageData, mimeType, prompt, imageSize);
+    return { imageBase64, model: PRIMARY_IMAGE_MODEL };
+  } catch (error: any) {
+    console.warn(`${PRIMARY_IMAGE_MODEL} failed, trying generateContent image models:`, error?.message || error);
+    return generateImageWithGenerateContent(ai, base64ImageData, mimeType, prompt, imageSize);
+  }
+};
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -206,12 +269,20 @@ async function startServer() {
         return res.status(400).json({ error: 'Vui lòng nhập API key.' });
       }
 
-      await listModelsForKey(apiKey);
+      const ai = getApiClient(apiKey);
+      if (!ai) {
+        return res.status(400).json({ error: 'Vui lòng nhập API key.' });
+      }
+
+      await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: 'Reply exactly: OK',
+      });
 
       return res.json({
         ok: true,
-        imageModel: IMAGE_MODEL,
-        message: `API key hợp lệ. App sẽ dùng model ảnh: ${IMAGE_MODEL}.`,
+        imageModel: PRIMARY_IMAGE_MODEL,
+        message: `API key hợp lệ. App sẽ ưu tiên ${PRIMARY_IMAGE_MODEL}, nếu không được sẽ tự dùng model ảnh tương thích.`,
       });
     } catch (error: any) {
       console.error('API key test failed:', error?.message || error);
@@ -257,13 +328,13 @@ Output:
 - Fidelity/cleanup level: ${quality}/10 (${getQualityDescription(quality)})
 - The result must be ready for print production and manual Photoshop cleanup if a solid chroma background was selected.`;
 
-      const imageBase64 = await generateImage(ai, base64ImageData, mimeType, finalPrompt, imageSize);
+      const { imageBase64, model } = await generateImage(ai, base64ImageData, mimeType, finalPrompt, imageSize);
 
       return res.json({
         data: imageBase64,
         imageSize,
         backgroundColor,
-        model: IMAGE_MODEL,
+        model,
       });
     } catch (error: any) {
       console.error('Error processing image:', error?.message || error);
