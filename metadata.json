@@ -1,0 +1,6 @@
+{
+  "name": "Clone ảnh rep 1:1",
+  "description": "Tải ảnh mẫu và clone artwork rep 1:1 thành PNG in ấn với nền trong suốt hoặc nền chroma dễ tách thủ công.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_IMAGE_API"]
+}
