@@ -21,11 +21,22 @@ const GENERATE_CONTENT_IMAGE_MODELS = [
   'gemini-2.0-flash-exp-image-generation',
 ];
 
+const normalizeApiKey = (apiKey: unknown): string => {
+  if (typeof apiKey !== 'string') return '';
+  return apiKey
+    .replace(/^api\s*key\s*[:=]\s*/i, '')
+    .replace(/^key\s*[:=]\s*/i, '')
+    .replace(/["'`]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+};
+
 const getApiClient = (apiKey: unknown): GoogleGenAI | null => {
-  if (typeof apiKey !== 'string' || !apiKey.trim()) return null;
+  const normalizedKey = normalizeApiKey(apiKey);
+  if (!normalizedKey) return null;
 
   return new GoogleGenAI({
-    apiKey: apiKey.trim(),
+    apiKey: normalizedKey,
     httpOptions: {
       headers: {
         'User-Agent': 'print-clone-rep-app',
@@ -264,7 +275,7 @@ async function startServer() {
 
   app.post('/api/test-api-key', async (req, res) => {
     try {
-      const apiKey = typeof req.body.apiKey === 'string' ? req.body.apiKey.trim() : '';
+      const apiKey = normalizeApiKey(req.body.apiKey);
       if (!apiKey) {
         return res.status(400).json({ error: 'Vui lòng nhập API key.' });
       }

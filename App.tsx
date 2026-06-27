@@ -135,6 +135,9 @@ const App: React.FC = () => {
           >
             {apiMessage}
           </p>
+          <p className="mt-1 text-xs text-gray-600">
+            Dùng nút Copy key trong AI Studio rồi dán vào đây. Không gõ lại theo ảnh chụp vì dễ nhầm ký tự như O/0, I/l.
+          </p>
         </section>
 
         <div className="mb-6 rounded-lg border border-cyan-900/70 bg-cyan-950/30 px-4 py-3 text-sm text-cyan-100">
