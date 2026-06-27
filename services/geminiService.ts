@@ -1,4 +1,10 @@
-export const testApiKey = async (apiKey: string): Promise<void> => {
+export interface ApiKeyTestResult {
+  ok: boolean;
+  imageModel: string | null;
+  message: string;
+}
+
+export const testApiKey = async (apiKey: string): Promise<ApiKeyTestResult> => {
   const response = await fetch('/api/test-api-key', {
     method: 'POST',
     headers: {
@@ -11,6 +17,8 @@ export const testApiKey = async (apiKey: string): Promise<void> => {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error || `Server returned status ${response.status}`);
   }
+
+  return response.json();
 };
 
 export const processImageWithGemini = async (
