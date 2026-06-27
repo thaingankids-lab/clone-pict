@@ -31,13 +31,13 @@ const App: React.FC = () => {
     setApiMessage('Đang kiểm tra API key...');
 
     try {
-      await testApiKey(apiKey);
+      const result = await testApiKey(apiKey);
       setApiStatus('ok');
-      setApiMessage('API key dùng được. Bạn có thể clone ảnh.');
+      setApiMessage(result.message);
     } catch (err) {
       console.error(err);
       setApiStatus('error');
-      setApiMessage('API key không hợp lệ hoặc không kết nối được.');
+      setApiMessage(err instanceof Error ? err.message : 'Không thể kiểm tra API key.');
     }
   }, [apiKey, apiStatus]);
 

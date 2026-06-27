@@ -14,6 +14,7 @@ const ALLOWED_BACKGROUNDS = new Set([
   '#FFFFFF',
   '#000000',
 ]);
+const IMAGE_MODELS = ['gemini-3.1-flash-image', 'gemini-2.5-flash-image'];
 
 const getApiClient = (apiKey: unknown): GoogleGenAI | null => {
   if (typeof apiKey !== 'string' || !apiKey.trim()) return null;
@@ -26,6 +27,46 @@ const getApiClient = (apiKey: unknown): GoogleGenAI | null => {
       },
     },
   });
+};
+
+const getApiErrorMessage = (error: any): string => {
+  const message = String(error?.message || error || '');
+
+  if (/API key not valid|invalid api key|API_KEY_INVALID/i.test(message)) {
+    return 'API key không hợp lệ hoặc không thuộc đúng dịch vụ Gemini API.';
+  }
+
+  if (/permission|forbidden|PERMISSION_DENIED|referer|referrer|restriction|restricted/i.test(message)) {
+    return 'API key bị chặn bởi quyền hoặc giới hạn key. Hãy kiểm tra API restrictions/referrer restrictions.';
+  }
+
+  if (/quota|billing|RESOURCE_EXHAUSTED/i.test(message)) {
+    return 'API key hợp lệ nhưng đang hết quota hoặc cần kiểm tra billing.';
+  }
+
+  if (/not found|not supported|model/i.test(message)) {
+    return 'API key hợp lệ nhưng model ảnh đang dùng chưa khả dụng với key này.';
+  }
+
+  return 'Không thể kết nối hoặc kiểm tra API key. Hãy thử lại sau.';
+};
+
+const listModelsForKey = async (apiKey: string): Promise<string[]> => {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+  );
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const detail = payload?.error?.message || response.statusText || `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+
+  return Array.isArray(payload.models)
+    ? payload.models
+        .map((model: any) => (typeof model?.name === 'string' ? model.name.replace('models/', '') : null))
+        .filter(Boolean)
+    : [];
 };
 
 const getQualityDescription = (quality: number): string => {
@@ -65,6 +106,51 @@ const getBackgroundInstruction = (backgroundColor: string): string => {
 - Keep the artwork fully separated from the background so the user can manually remove this color in Photoshop if needed.`;
 };
 
+const generateImageWithFallback = async (
+  ai: GoogleGenAI,
+  base64ImageData: string,
+  mimeType: string,
+  prompt: string,
+  imageSize: string,
+) => {
+  let lastModelError: any = null;
+
+  for (const model of IMAGE_MODELS) {
+    try {
+      return await ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64ImageData,
+                mimeType,
+              },
+            },
+            {
+              text: prompt,
+            },
+          ],
+        },
+        config: {
+          responseModalities: [Modality.IMAGE],
+          imageConfig: {
+            imageSize,
+          },
+        },
+      });
+    } catch (error: any) {
+      lastModelError = error;
+      const message = String(error?.message || error || '');
+      if (!/not found|not supported|model|permission|PERMISSION_DENIED/i.test(message)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastModelError || new Error('No image model was available for this API key.');
+};
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -78,20 +164,24 @@ async function startServer() {
 
   app.post('/api/test-api-key', async (req, res) => {
     try {
-      const ai = getApiClient(req.body.apiKey);
-      if (!ai) {
+      const apiKey = typeof req.body.apiKey === 'string' ? req.body.apiKey.trim() : '';
+      if (!apiKey) {
         return res.status(400).json({ error: 'Vui lòng nhập API key.' });
       }
 
-      await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: 'Reply with exactly: OK',
-      });
+      const models = await listModelsForKey(apiKey);
+      const imageModel = IMAGE_MODELS.find((model) => models.includes(model)) || null;
 
-      return res.json({ ok: true });
+      return res.json({
+        ok: true,
+        imageModel,
+        message: imageModel
+          ? `API key hợp lệ. Model ảnh khả dụng: ${imageModel}.`
+          : 'API key hợp lệ, nhưng chưa thấy model tạo ảnh phù hợp trên key này.',
+      });
     } catch (error: any) {
       console.error('API key test failed:', error?.message || error);
-      return res.status(401).json({ error: 'API key không hợp lệ hoặc không thể kết nối.' });
+      return res.status(401).json({ error: getApiErrorMessage(error) });
     }
   });
 
@@ -133,29 +223,7 @@ Output:
 - Fidelity/cleanup level: ${quality}/10 (${getQualityDescription(quality)})
 - The result must be ready for print production and manual Photoshop cleanup if a solid chroma background was selected.`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64ImageData,
-                mimeType,
-              },
-            },
-            {
-              text: finalPrompt,
-            },
-          ],
-        },
-        config: {
-          responseModalities: [Modality.IMAGE],
-          imageConfig: {
-            imageSize,
-          },
-        },
-      });
-
+      const response = await generateImageWithFallback(ai, base64ImageData, mimeType, finalPrompt, imageSize);
       const parts = response.candidates?.[0]?.content?.parts || [];
       const imagePart = parts.find((part) => part.inlineData?.data);
 
@@ -170,7 +238,7 @@ Output:
       throw new Error('No image data found in the API response.');
     } catch (error: any) {
       console.error('Error processing image:', error?.message || error);
-      res.status(500).json({ error: error.message || 'Failed to process image.' });
+      res.status(500).json({ error: getApiErrorMessage(error) });
     }
   });
 
